@@ -3,6 +3,7 @@ const axios = require('axios');
 const { spawn } = require('child_process');
 const NodeCache = require('node-cache');
 const ffmpegStatic = require('ffmpeg-static');
+const path = require('path');
 
 const app = express();
 const cache = new NodeCache({ stdTTL: 18000 }); // 5-hour cache
@@ -171,14 +172,27 @@ app.get('/stream/:videoId/segment:segNum.ts', async (req, res) => {
 
     // Simplified FFmpeg command
     const ffmpegArgs = [
-      '-i', videoData.url, // Input URL
-      '-ss', startTime.toString(), // Seek to start time
-      '-t', segmentDuration.toString(), // Duration of segment
-      '-c:v', 'copy', // Copy video stream
-      '-c:a', 'copy', // Copy audio stream
-      '-f', 'mpegts', // Output format
-      'pipe:', // Output to stdout
+      '-i', videoData.url,
+      '-ss', startTime.toString(),
+      '-t', segmentDuration.toString(),
+      '-c:v', 'copy',
+      '-c:a', 'copy',
+      '-f', 'mpegts',
+      'pipe:',
     ];
+
+    // Fallback to transcoding if copy fails (uncomment if needed)
+    /*
+    const ffmpegArgs = [
+      '-i', videoData.url,
+      '-ss', startTime.toString(),
+      '-t', segmentDuration.toString(),
+      '-c:v', 'libx264',
+      '-c:a', 'aac',
+      '-f', 'mpegts',
+      'pipe:',
+    ];
+    */
 
     console.log(`FFmpeg command: ${ffmpegStatic} ${ffmpegArgs.join(' ')}`);
 
@@ -288,7 +302,7 @@ app.get('/', (req, res) => {
       errorDiv.textContent = '';
 
       if (Hls.isSupported()) {
-        const hls = new Hls();
+        const hls = new Hls({ debug: true }); // Enable HLS.js debug logs
         hls.loadSource(streamUrl);
         hls.attachMedia(video);
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
