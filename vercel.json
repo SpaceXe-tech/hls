@@ -3,21 +3,13 @@
   "builds": [
     {
       "src": "index.js",
-      "use": "@vercel/node",
-      "config": {
-        "maxLambdaSize": "50mb" // Increase size to accommodate FFmpeg binary
-      }
+      "use": "@vercel/node"
     }
   ],
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "index.js",
-      "methods": ["GET", "POST"],
-      "headers": {
-        "Access-Control-Allow-Origin": "*",
-        "Cache-Control": "public, max-age=31536000"
-      }
+      "dest": "index.js"
     }
   ],
   "env": {
@@ -28,11 +20,5 @@
       "path": "/api/cleanup",
       "schedule": "0 0 * * *"
     }
-  ],
-  "functions": {
-    "index.js": {
-      "memory": 1024, // Increase memory for FFmpeg
-      "maxDuration": 60 // Increase duration for segment generation
-    }
-  }
+  ]
 }
