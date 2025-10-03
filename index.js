@@ -10,7 +10,7 @@ const cache = new NodeCache({ stdTTL: 18000 }); // 5-hour cache
 app.use(express.json());
 
 // -----------------------------
-// Fetch YouTube data (Vidfly API)
+// Fetch YouTube data
 // -----------------------------
 async function fetchYouTubeData(url) {
   try {
@@ -56,27 +56,83 @@ function isUrlExpired(url) {
   const expireMatch = url.match(/expire=(\d+)/);
   if (!expireMatch) return true;
   const expireTime = parseInt(expireMatch[1], 10) * 1000;
-  return Date.now() >= expireTime - 300000; // refresh 5 mins before expiry
+  return Date.now() >= expireTime - 300000; // 5-minute buffer
 }
 
-async function getVideoFormats(videoId) {
+async function getVideoFormats(videoId, forceRefresh = false) {
   if (!videoId.match(/^[a-zA-Z0-9_-]{11}$/)) {
     throw new Error('Invalid YouTube video ID');
   }
 
   const cacheKey = `${videoId}_formats`;
-  let cached = cache.get(cacheKey);
-
-  if (!cached || cached.formats.some(f => isUrlExpired(f.url))) {
-    console.log(`🔄 Refreshing formats for ${videoId}`);
-    const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    const data = await fetchYouTubeData(youtubeUrl);
-    const validFormats = data.formats.filter((f) => f.url);
-    cached = { ...data, formats: validFormats };
-    cache.set(cacheKey, cached);
+  if (!forceRefresh) {
+    const cached = cache.get(cacheKey);
+    if (cached) return cached;
   }
 
-  return cached;
+  const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  const data = await fetchYouTubeData(youtubeUrl);
+
+  // Keep only formats with direct URLs
+  const validFormats = data.formats.filter((f) => f.url);
+
+  cache.set(cacheKey, { ...data, formats: validFormats });
+  return { ...data, formats: validFormats };
+}
+
+// -----------------------------
+// FFmpeg runner with auto-refresh
+// -----------------------------
+async function runFFmpeg(videoId, format, startTime, duration, res, isAudio = false) {
+  // Refresh URL if expired
+  if (isUrlExpired(format.url)) {
+    console.log(`Refreshing expired URL for ${videoId} (${format.quality})`);
+    const refreshed = await getVideoFormats(videoId, true);
+    const freshFormat = refreshed.formats.find(
+      (f) => f.quality === format.quality && f.type === format.type
+    );
+    if (freshFormat) format = freshFormat;
+  }
+
+  const baseArgs = [
+    '-hide_banner',
+    '-loglevel', 'error', // only show fatal errors
+    '-ss', startTime.toString(),
+    '-t', duration.toString(),
+    '-i', format.url,
+    '-reconnect', '1',
+    '-reconnect_streamed', '1',
+    '-reconnect_delay_max', '5'
+  ];
+
+  let args;
+  if (isAudio) {
+    args = [...baseArgs, '-c:a', 'aac', '-vn', '-f', 'adts', 'pipe:1'];
+    res.set({ 'Content-Type': 'audio/aac', 'Access-Control-Allow-Origin': '*' });
+  } else {
+    args = [...baseArgs, '-c:v', 'libx264', '-preset', 'veryfast', '-c:a', 'aac', '-f', 'mpegts', 'pipe:1'];
+    res.set({ 'Content-Type': 'video/mp2t', 'Access-Control-Allow-Origin': '*' });
+  }
+
+  const ffmpeg = spawn(ffmpegStatic, args);
+
+  ffmpeg.stdout.pipe(res);
+  ffmpeg.stderr.on('data', (d) => {
+    const msg = d.toString();
+    if (!msg.includes('No trailing CRLF found')) {
+      console.error('FFmpeg:', msg);
+    }
+  });
+
+  ffmpeg.on('close', (code) => {
+    if (code !== 0) {
+      console.error(`FFmpeg exited with code ${code}`);
+    }
+  });
+
+  res.on('close', () => {
+    ffmpeg.kill('SIGTERM');
+  });
 }
 
 // -----------------------------
@@ -86,14 +142,13 @@ app.get('/stream/:videoId/master.m3u8', async (req, res) => {
   try {
     const { videoId } = req.params;
     const data = await getVideoFormats(videoId);
+
     const videoQualities = ['360p', '480p', '720p', '1080p'];
+    const duration = data.duration;
 
     let manifest = `#EXTM3U\n#EXT-X-VERSION:3\n`;
-
-    // Audio group
     manifest += `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",DEFAULT=YES,AUTOSELECT=YES,URI="/stream/${videoId}/audio.m3u8"\n`;
 
-    // Video variants
     for (const q of videoQualities) {
       const f = data.formats.find((f) => f.quality.includes(q) && f.type === 'video_with_audio');
       if (!f) continue;
@@ -117,13 +172,12 @@ app.get('/stream/:videoId/master.m3u8', async (req, res) => {
     });
     res.send(manifest);
   } catch (error) {
-    console.error('Master manifest error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
 // -----------------------------
-// Variant manifests (per quality)
+// Variant playlists
 // -----------------------------
 app.get('/stream/:videoId/:quality.m3u8', async (req, res) => {
   try {
@@ -153,10 +207,7 @@ app.get('/stream/:videoId/:quality.m3u8', async (req, res) => {
 
     manifest += '#EXT-X-ENDLIST\n';
 
-    res.set({
-      'Content-Type': 'application/vnd.apple.mpegurl',
-      'Access-Control-Allow-Origin': '*',
-    });
+    res.set({ 'Content-Type': 'application/vnd.apple.mpegurl', 'Access-Control-Allow-Origin': '*' });
     res.send(manifest);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -164,7 +215,7 @@ app.get('/stream/:videoId/:quality.m3u8', async (req, res) => {
 });
 
 // -----------------------------
-// Audio-only manifest
+// Audio playlist
 // -----------------------------
 app.get('/stream/:videoId/audio.m3u8', async (req, res) => {
   try {
@@ -194,10 +245,7 @@ app.get('/stream/:videoId/audio.m3u8', async (req, res) => {
 
     manifest += '#EXT-X-ENDLIST\n';
 
-    res.set({
-      'Content-Type': 'application/vnd.apple.mpegurl',
-      'Access-Control-Allow-Origin': '*',
-    });
+    res.set({ 'Content-Type': 'application/vnd.apple.mpegurl', 'Access-Control-Allow-Origin': '*' });
     res.send(manifest);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -205,85 +253,46 @@ app.get('/stream/:videoId/audio.m3u8', async (req, res) => {
 });
 
 // -----------------------------
-// Segment generator
+// Segment endpoints
 // -----------------------------
-function runFFmpeg(url, startTime, duration, res, isAudio = false) {
-  const headers = [
-    "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/118 Safari/537.36",
-    "Referer: https://www.youtube.com/",
-    "Origin: https://www.youtube.com/",
-  ];
-
-  const baseArgs = [
-    "-ss", startTime.toString(),
-    "-t", duration.toString(),
-    "-headers", headers.join("\r\n"),
-    "-i", url
-  ];
-
-  let args;
-  if (isAudio) {
-    args = [...baseArgs, "-c:a", "aac", "-vn", "-f", "adts", "pipe:1"];
-  } else {
-    args = [...baseArgs, "-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", "-f", "mpegts", "pipe:1"];
-  }
-
-  const ffmpeg = spawn(ffmpegStatic, args);
-
-  ffmpeg.stdout.pipe(res);
-  ffmpeg.stderr.on("data", (d) => console.error("FFmpeg:", d.toString()));
-
-  ffmpeg.on("close", (code) => {
-    if (code !== 0) console.error(`FFmpeg exited with code ${code}`);
-  });
-
-  res.on("close", () => {
-    ffmpeg.kill("SIGTERM");
-  });
-}
-
-// Video segment
 app.get('/stream/:videoId/segment:segNum_:quality.ts', async (req, res) => {
   try {
     const { videoId, segNum, quality } = req.params;
     const segIndex = parseInt(segNum, 10);
 
     const data = await getVideoFormats(videoId);
-    const format = data.formats.find((f) => f.quality.includes(quality) && f.type === 'video_with_audio');
+    let format = data.formats.find((f) => f.quality.includes(quality) && f.type === 'video_with_audio');
     if (!format) throw new Error('Format not available');
 
     const segDuration = 10;
     const startTime = segIndex * segDuration;
 
-    res.set({ 'Content-Type': 'video/mp2t', 'Access-Control-Allow-Origin': '*' });
-    runFFmpeg(format.url, startTime, segDuration, res, false);
+    await runFFmpeg(videoId, format, startTime, segDuration, res, false);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Audio segment
 app.get('/stream/:videoId/asegment:segNum.aac', async (req, res) => {
   try {
     const { videoId, segNum } = req.params;
     const segIndex = parseInt(segNum, 10);
 
     const data = await getVideoFormats(videoId);
-    const format = data.formats.find((f) => f.type === 'audio');
+    let format = data.formats.find((f) => f.type === 'audio');
     if (!format) throw new Error('Audio format not available');
 
     const segDuration = 10;
     const startTime = segIndex * segDuration;
 
-    res.set({ 'Content-Type': 'audio/aac', 'Access-Control-Allow-Origin': '*' });
-    runFFmpeg(format.url, startTime, segDuration, res, true);
+    await runFFmpeg(videoId, format, startTime, segDuration, res, true);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // -----------------------------
-// HTML Player
+// Demo HTML
 // -----------------------------
 app.get('/', (req, res) => {
   res.send(`
@@ -330,5 +339,5 @@ app.get('/', (req, res) => {
 module.exports = app;
 
 if (require.main === module) {
-  app.listen(3000, () => console.log('🚀 Server running on http://localhost:3000'));
+  app.listen(3000, () => console.log('Server running on port 3000'));
 }
