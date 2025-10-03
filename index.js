@@ -53,12 +53,11 @@ function isUrlExpired(url) {
   const expireMatch = url.match(/expire=(\d+)/);
   if (!expireMatch) return true;
   const expireTime = parseInt(expireMatch[1], 10) * 1000;
-  return Date.now() >= expireTime - 300000; // Reduced buffer to 5 minutes
+  return Date.now() >= expireTime - 300000; // 5-minute buffer
 }
 
 // Get video URL with refresh
 async function getVideoUrl(videoId, quality = '720p') {
-  // Validate videoId
   if (!videoId.match(/^[a-zA-Z0-9_-]{11}$/)) {
     throw new Error('Invalid YouTube video ID');
   }
@@ -96,7 +95,6 @@ app.get('/stream/:videoId/master.m3u8', async (req, res) => {
   try {
     const { videoId } = req.params;
 
-    // Validate videoId
     if (!videoId.match(/^[a-zA-Z0-9_-]{11}$/)) {
       throw new Error('Invalid YouTube video ID');
     }
@@ -171,25 +169,21 @@ app.get('/stream/:videoId/segment:segNum.ts', async (req, res) => {
       throw new Error('FFmpeg binary not found. Ensure ffmpeg-static is installed.');
     }
 
-    // FFmpeg command with improved error handling and logging
+    // Simplified FFmpeg command
     const ffmpegArgs = [
-      '-y', // Overwrite output files without asking
-      '-loglevel', 'error', // Limit stderr to errors only
-      '-ss', startTime.toString(), // Seek to start time
       '-i', videoData.url, // Input URL
+      '-ss', startTime.toString(), // Seek to start time
       '-t', segmentDuration.toString(), // Duration of segment
       '-c:v', 'copy', // Copy video stream
-      '-c:a', 'aac', // Encode audio to AAC
-      '-b:a', '128k', // Audio bitrate
+      '-c:a', 'copy', // Copy audio stream
       '-f', 'mpegts', // Output format
-      '-avoid_negative_ts', 'make_zero', // Handle negative timestamps
-      'pipe:1', // Output to stdout
+      'pipe:', // Output to stdout
     ];
 
     console.log(`FFmpeg command: ${ffmpegStatic} ${ffmpegArgs.join(' ')}`);
 
     const ffmpeg = spawn(ffmpegStatic, ffmpegArgs, {
-      stdio: ['pipe', 'pipe', 'pipe'], // Explicitly define stdio
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
 
     // Pipe FFmpeg output to response
@@ -225,7 +219,7 @@ app.get('/stream/:videoId/segment:segNum.ts', async (req, res) => {
 
     // Clean up FFmpeg process when client disconnects
     req.on('close', () => {
-      ffmpeg.kill('SIGTERM'); // Graceful termination
+      ffmpeg.kill('SIGTERM');
     });
 
   } catch (error) {
@@ -241,7 +235,6 @@ app.get('/api/info/:videoId', async (req, res) => {
   try {
     const { videoId } = req.params;
 
-    // Validate videoId
     if (!videoId.match(/^[a-zA-Z0-9_-]{11}$/)) {
       throw new Error('Invalid YouTube video ID');
     }
