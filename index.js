@@ -2,12 +2,13 @@ const express = require('express');
 const axios = require('axios');
 const { spawn } = require('child_process');
 const NodeCache = require('node-cache');
+const ffmpegStatic = require('ffmpeg-static'); // Added ffmpeg-static
 
 const app = express();
 const cache = new NodeCache({ stdTTL: 18000 }); // 5 hour cache
 
 // Middleware
-app.use(express.json()); // Added to parse JSON bodies, if needed
+app.use(express.json());
 
 // Fetch YouTube data
 async function fetchYouTubeData(url) {
@@ -49,10 +50,10 @@ async function fetchYouTubeData(url) {
 
 // Check if URL expired
 function isUrlExpired(url) {
-  const expireMatch = url.match(/expire=(\d+)/); // Fixed regex syntax
+  const expireMatch = url.match(/expire=(\d+)/);
   if (!expireMatch) return true;
-  const expireTime = parseInt(expireMatch[1]) * 1000;
-  return Date.now() >= expireTime - 1800000; // Simplified expression
+  const expireTime = parseInt(expireMatch[1], 10) * 1000;
+  return Date.now() >= expireTime - 1800000;
 }
 
 // Get video URL with refresh
@@ -128,7 +129,7 @@ app.get('/stream/:videoId/master.m3u8', async (req, res) => {
 app.get('/stream/:videoId/segment:segNum.ts', async (req, res) => {
   try {
     const { videoId, segNum } = req.params;
-    const segmentIndex = parseInt(segNum, 10); // Added radix for parseInt
+    const segmentIndex = parseInt(segNum, 10);
     const segmentDuration = 10;
     const startTime = segmentIndex * segmentDuration;
 
@@ -141,8 +142,13 @@ app.get('/stream/:videoId/segment:segNum.ts', async (req, res) => {
       'Access-Control-Allow-Origin': '*',
     });
 
-    // Use ffmpeg to extract segment
-    const ffmpeg = spawn('ffmpeg', [
+    // Check if ffmpeg binary exists
+    if (!ffmpegStatic) {
+      throw new Error('FFmpeg binary not found. Ensure ffmpeg-static is installed.');
+    }
+
+    // Use ffmpeg-static binary
+    const ffmpeg = spawn(ffmpegStatic, [
       '-ss', startTime.toString(),
       '-i', videoData.url,
       '-t', segmentDuration.toString(),
@@ -163,14 +169,14 @@ app.get('/stream/:videoId/segment:segNum.ts', async (req, res) => {
     ffmpeg.on('error', (err) => {
       console.error('FFmpeg spawn error:', err);
       if (!res.headersSent) {
-        res.status(500).end();
+        res.status(500).json({ error: 'Failed to spawn FFmpeg process' });
       }
     });
 
     ffmpeg.on('close', (code) => {
       if (code !== 0 && !res.headersSent) {
         console.error(`FFmpeg exited with code ${code}`);
-        res.status(500).end();
+        res.status(500).json({ error: `FFmpeg process exited with code ${code}` });
       }
     });
 
